@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>TomiFoto</title>
+<!--
+  TomiFoto - own Cast receiver for the slideshow (instead of Google's Default Media Receiver).
+  Shows the photos the phone sends with a soft cross-fade, no player bar, no black in between.
+  Videos play in a <video> element. A tiny silent looping video keeps the TV from starting its
+  screensaver. Keys of the TV remote (left/right/OK) go back to the phone.
+
+  Messages on the namespace urn:x-cast:ch.koller.tomifoto (JSON):
+    phone -> TV: {type:"SHOW", url, video:bool, fade:ms}, {type:"PAUSE"}, {type:"RESUME"},
+                 {type:"KEEPAWAKE", url}, {type:"STOP"}
+    TV -> phone: {type:"READY"}, {type:"SHOWN", url}, {type:"ENDED", url}, {type:"ERROR", url, text},
+                 {type:"KEY", key:"NEXT"|"PREV"|"TOGGLE"}
+  Host this file on HTTPS (e.g. GitHub Pages) and register its URL in the Cast Developer Console.
+-->
+<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  .layer { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0;
+           transition: opacity 800ms ease-in-out; background: transparent; }
+  #keep { position: absolute; right: 0; bottom: 0; width: 2px; height: 2px; opacity: 0.01; }
+  #msg { position: absolute; left: 3%; bottom: 4%; color: #ccc; font: 24px sans-serif; opacity: 0.8; }
+</style>
+</head>
+<body>
+<img id="a" class="layer" alt="">
+<img id="b" class="layer" alt="">
+<video id="v" class="layer" playsinline></video>
+<video id="keep" muted loop playsinline></video>
+<div id="msg">TomiFoto</div>
+<script>
+  const NS = 'urn:x-cast:ch.koller.tomifoto';
+  const ctx = cast.framework.CastReceiverContext.getInstance();
+  const imgs = [document.getElementById('a'), document.getElementById('b')];
+  const video = document.getElementById('v');
+  const keep = document.getElementById('keep');
+  const msg = document.getElementById('msg');
+  let front = 0;          // index of the image layer that is visible
+  let showing = 'none';   // 'img' | 'video' | 'none'
+  let current = null;     // url being shown
+  let token = 0;          // newer SHOW wins over a slow older one
+
+  function send(data) {
+    try { ctx.sendCustomMessage(NS, undefined, data); } catch (e) { /* no sender yet */ }
+  }
+
+  function setFade(ms) {
+    const t = 'opacity ' + ms + 'ms ease-in-out';
+    imgs.forEach(i => i.style.transition = t);
+    video.style.transition = t;
+  }
+
+  function showImage(url, fade) {
+    const my = ++token;
+    const next = imgs[1 - front];
+    next.onload = () => {
+      if (my !== token) return;
+      setFade(fade);
+      next.style.opacity = 1;
+      imgs[front].style.opacity = 0;
+      if (showing === 'video') { video.style.opacity = 0; setTimeout(stopVideo, fade + 50); }
+      front = 1 - front;
+      showing = 'img';
+      msg.style.display = 'none';
+      send({ type: 'SHOWN', url: url });
+    };
+    next.onerror = () => { if (my === token) send({ type: 'ERROR', url: url, text: 'Foto nicht ladbar' }); };
+    next.src = url;
+  }
+
+  function stopVideo() {
+    if (showing === 'video') return;
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  }
+
+  function showVideo(url, fade) {
+    const my = ++token;
+    video.onplaying = () => {
+      if (my !== token) return;
+      setFade(fade);
+      video.style.opacity = 1;
+      imgs.forEach(i => i.style.opacity = 0);
+      showing = 'video';
+      msg.style.display = 'none';
+      send({ type: 'SHOWN', url: url });
+    };
+    video.onended = () => { if (my === token) send({ type: 'ENDED', url: url }); };
+    video.onerror = () => { if (my === token) send({ type: 'ERROR', url: url, text: 'Video nicht abspielbar' }); };
+    video.muted = false;
+    video.src = url;
+    video.play().catch(() => { video.muted = true; video.play().catch(() => {}); });
+  }
+
+  ctx.addCustomMessageListener(NS, (event) => {
+    const m = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+    const fade = typeof m.fade === 'number' ? m.fade : 800;
+    switch (m.type) {
+      case 'SHOW':
+        current = m.url;
+        if (m.video) showVideo(m.url, fade); else showImage(m.url, fade);
+        break;
+      case 'PAUSE':
+        if (showing === 'video') video.pause();
+        break;
+      case 'RESUME':
+        if (showing === 'video') video.play().catch(() => {});
+        break;
+      case 'KEEPAWAKE':
+        keep.src = m.url;
+        keep.play().catch(() => {});
+        break;
+      case 'STOP':
+        ctx.stop();
+        break;
+    }
+  });
+
+  // keys of the TV remote -> phone (does the slideshow's next/previous/pause)
+  const keys = {
+    ArrowRight: 'NEXT', MediaTrackNext: 'NEXT', MediaFastForward: 'NEXT', ChannelUp: 'NEXT',
+    ArrowLeft: 'PREV', MediaTrackPrevious: 'PREV', MediaRewind: 'PREV', ChannelDown: 'PREV',
+    Enter: 'TOGGLE', MediaPlayPause: 'TOGGLE', MediaPlay: 'TOGGLE', MediaPause: 'TOGGLE'
+  };
+  document.addEventListener('keydown', (e) => {
+    const k = keys[e.key];
+    if (k) { send({ type: 'KEY', key: k }); e.preventDefault(); }
+  });
+
+  const options = new cast.framework.CastReceiverOptions();
+  options.customNamespaces = { [NS]: cast.framework.system.MessageType.JSON };
+  // no media player library needed, and never close because "nothing plays"
+  options.skipPlayersLoad = true;
+  options.disableIdleTimeout = true;
+  options.statusText = 'TomiFoto Diashow';
+  ctx.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, () => send({ type: 'READY' }));
+  ctx.start(options);
+</script>
+</body>
+</html>
