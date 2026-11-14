@@ -138,6 +138,13 @@
   options.disableIdleTimeout = true;
   options.statusText = 'TomiFoto Diashow';
   ctx.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, () => send({ type: 'READY' }));
+  // the idle timeout is off, so close ourselves when the phone has left: at once when it ended the
+  // connection, after a minute when it was lost (WLAN gone) and the phone did not come back
+  ctx.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, (e) => {
+    if (ctx.getSenders().length > 0) return;
+    const asked = e && e.reason === cast.framework.system.DisconnectReason.REQUESTED_BY_SENDER;
+    setTimeout(() => { if (ctx.getSenders().length === 0) ctx.stop(); }, asked ? 0 : 60000);
+  });
   ctx.start(options);
 </script>
 </body>
