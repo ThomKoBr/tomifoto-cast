@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<!--
+  TomiPlay's own Cast receiver: plays like Google's standard receiver, but with TomiPlay's volume boost
+  (Web Audio: gain + limiter, so the louder sound does not distort).
+
+  Set up once (see README, "Fernseher"):
+  1. Host this file on HTTPS (e.g. Netlify Drop or Firebase Hosting).
+  2. cast.google.com/publish → Add new application → Custom Receiver → this address → App-ID (8 characters).
+  3. Register the Chromecast / Google TV there as test device (serial number), or publish the application.
+  4. TomiPlay → Einstellungen → Fernseher → "Eigener Cast-Empfänger" → App-ID.
+
+  The phone sends {"boostDb": 0…15, "cors": true/false} with every load (customData) and as a message on
+  urn:x-cast:ch.koller.tomiplay when the boost is turned. Files from the phone allow Web Audio (CORS);
+  radio stations not, they play on a second element without the boost.
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>TomiPlay</title>
+  <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: Roboto, sans-serif; }
+    video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; display: none; }
+    video.on { display: block; }
+    #info { position: absolute; left: 5%; bottom: 7%; right: 5%; color: #fff; font-size: 34px;
+            text-shadow: 0 2px 6px #000; transition: opacity 1s; opacity: 0; }
+    #info small { display: block; font-size: 22px; color: #ccc; margin-top: 6px; }
+    #idle { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            color: #888; font-size: 40px; }
+  </style>
+</head>
+<body>
+  <video id="boosted" crossorigin="anonymous"></video>
+  <video id="plain"></video>
+  <div id="idle">TomiPlay</div>
+  <div id="info"></div>
+  <script>
+    const NS = 'urn:x-cast:ch.koller.tomiplay';
+    const context = cast.framework.CastReceiverContext.getInstance();
+    const pm = context.getPlayerManager();
+    const boosted = document.getElementById('boosted');
+    const plain = document.getElementById('plain');
+    const info = document.getElementById('info');
+    const idle = document.getElementById('idle');
+
+    let audio = null, gain = null, boostDb = 0, current = plain;
+
+    // the boost path: element → gain → limiter → speakers (built once, the element keeps it)
+    function graph() {
+      if (audio) return;
+      try {
+        audio = new AudioContext();
+        const src = audio.createMediaElementSource(boosted);
+        gain = audio.createGain();
+        const limit = audio.createDynamicsCompressor();
+        limit.threshold.value = -2; limit.knee.value = 0; limit.ratio.value = 20;
+        limit.attack.value = 0.003; limit.release.value = 0.15;
+        src.connect(gain); gain.connect(limit); limit.connect(audio.destination);
+      } catch (e) { console.warn('TomiPlay boost', e); audio = null; gain = null; }
+      setBoost(boostDb);
+    }
+
+    function setBoost(db) {
+      boostDb = Math.max(0, Math.min(15, Number(db) || 0));
+      if (gain) gain.gain.setTargetAtTime(Math.pow(10, boostDb / 20), audio.currentTime, 0.05);
+      if (audio && audio.state === 'suspended') audio.resume();
+    }
+
+    function use(el) {
+      if (current !== el) { current.pause(); current.classList.remove('on'); current = el; }
+      pm.setMediaElement(el);
+    }
+
+    function show(media) {
+      const m = media && media.metadata;
+      if (!m || !m.title) { info.style.opacity = 0; return; }
+      info.innerHTML = '';
+      info.append(document.createTextNode(m.title));
+      const sub = [m.artist, m.albumName].filter(Boolean).join(' · ');
+      if (sub) { const s = document.createElement('small'); s.textContent = sub; info.append(s); }
+      info.style.opacity = 1;
+      clearTimeout(show.t); show.t = setTimeout(() => info.style.opacity = 0, 6000);
+    }
+
+    pm.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, req => {
+      const d = (req.media && req.media.customData) || req.customData || {};
+      const cors = d.cors === true;
+      if (d.boostDb !== undefined) boostDb = d.boostDb;
+      if (cors) { use(boosted); graph(); setBoost(boostDb); } else use(plain);
+      const video = (req.media.contentType || '').startsWith('video');
+      current.classList.toggle('on', video);
+      idle.style.display = video ? 'none' : 'flex';
+      show(req.media);
+      return req;
+    });
+
+    pm.addEventListener(cast.framework.events.EventType.PLAYING, () => {
+      if (audio && audio.state === 'suspended') audio.resume();
+    });
+    pm.addEventListener(cast.framework.events.EventType.MEDIA_STATUS, e => {
+      const m = e.mediaStatus && e.mediaStatus.media;
+      if (m && m.contentType && m.contentType.startsWith('video')) current.classList.add('on');
+    });
+
+    context.addCustomMessageListener(NS, e => {
+      const d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+      if (d && d.boostDb !== undefined) setBoost(d.boostDb);
+    });
+
+    pm.setMediaElement(plain);
+    const options = new cast.framework.CastReceiverOptions();
+    options.disableIdleTimeout = false;
+    options.customNamespaces = { [NS]: cast.framework.system.MessageType.JSON };
+    context.start(options);
+  </script>
+</body>
+</html>
